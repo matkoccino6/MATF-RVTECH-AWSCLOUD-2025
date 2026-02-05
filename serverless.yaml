@@ -17,12 +17,13 @@ provider:
 functions:
   # Function to get all chargers from DynamoDB
   getChargers:
-    handler: getChargers.getChargers
+    handler: getChargers.handler
     description: Get all chargers
     events:
       - http:
-          path: chargers
+          path: chargers/{town}
           method: get
+          cors: true
   # Function to sync data from Open Charge Map every minute
   syncOCMdata:
     handler: syncOCMdata.handler
