@@ -1,5 +1,6 @@
 service: punjaci
 frameworkVersion: "3"
+useDotenv: true                                           # Load API key from .env file
 
 plugins:
   - serverless-localstack
@@ -7,6 +8,11 @@ plugins:
 provider:
   name: aws
   runtime: nodejs18.x
+  region: us-east-1                 		                  # AWS deploy region
+  environment:                      		                  # Environment varijable dostupne Lambda funkcijama
+    OCM_API_KEY: ${env:OCM_API_KEY}                       # API ključ za Open Charge Map (iz .env fajla)
+    OCM_URL: 'https://api.openchargemap.io/v3/poi'        # URL za OCM API
+    CHARGERS_TABLE: Chargers        		                  # Naziv DynamoDB tabele
 
 functions:
   # Function to get all chargers from DynamoDB
@@ -19,11 +25,16 @@ functions:
           method: get
   # Function to sync data from Open Charge Map every minute
   syncOCMdata:
-    handler: syncOCMdata.syncOCM
+    handler: syncOCMdata.handler
     description: Sync data from Open Charge Map
+    role: SyncOCMDataRole           		# Referenca na IAM rolu definisanu u resources
     events:
       - schedule:
           rate: rate(1 minute)
+      - http:                       		# API Gateway HTTP endpoint
+          path: sync                		# Putanja: /sync
+          method: get   
+          cors: true   
 
 resources:
   Resources:
@@ -31,14 +42,24 @@ resources:
     ChargersTable:
       Type: AWS::DynamoDB::Table
       Properties:
-        TableName: Chargers
+        TableName: ${self:provider.environment.CHARGERS_TABLE}
         BillingMode: PAY_PER_REQUEST
         AttributeDefinitions:
-          - AttributeName: chargeId
+          - AttributeName: chargerId
+            AttributeType: S
+          - AttributeName: town
             AttributeType: S
         KeySchema:
-          - AttributeName: chargeId
+          - AttributeName: chargerId
             KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: TownIndex
+            KeySchema:
+              - AttributeName: town
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+
     # http:/punjaci-website.s3-website.localhost.localstack.cloud:4566
     # S3 Bucket for static website hosting
     WebsiteBucket:
@@ -60,3 +81,40 @@ resources:
               Principal: "*"
               Action: s3:GetObject
               Resource: !Join ["", ["arn:aws:s3:::", !Ref WebsiteBucket, "/*"]]
+# IAM rola za Lambda funkciju, nije potrebna kad je u pitanju localstack, ali treba za AWS
+    SyncOCMDataRole:
+      Type: AWS::IAM::Role              # CloudFormation tip - IAM rola
+      Properties:
+        RoleName: syncOCMdata-role-${sls:stage}     # Ime role vidljivo u LocalStack/AWS konzoli
+        AssumeRolePolicyDocument:       # Trust policy - ko može preuzeti ovu rolu
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com  # Lambda servis može preuzeti rolu
+              Action: sts:AssumeRole
+        Policies:                       # Inline polise priključene roli
+          - PolicyName: DynamoDBAccess    # Polisa za pristup DynamoDB
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow         # Dozvoli DynamoDB operacije
+                  Action:
+                    - dynamodb:PutItem
+                    - dynamodb:BatchWriteItem
+                    - dynamodb:Scan
+                    - dynamodb:Query
+                    - dynamodb:DeleteItem
+                  Resource:
+                    - !GetAtt ChargersTable.Arn                              # ARN tabele
+                    - !Join ['/', [!GetAtt ChargersTable.Arn, 'index/*']]    # ARN indeksa
+          - PolicyName: CloudWatchLogs    # Polisa za Lambda logove
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - logs:CreateLogGroup
+                    - logs:CreateLogStream
+                    - logs:PutLogEvents
+                  Resource: "*"
